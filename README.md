@@ -75,18 +75,12 @@ A modern, full-stack e-commerce application built with React and Node.js. This p
 ## 🧪 Running Tests
 
 
-
-### Test Coverage
-To generate test coverage reports:
 ```bash
 # For backend
 cd backend
-npm test -- --coverage
-
-# For frontend
-cd client
-npm test -- --coverage
+npx jest --verbose
 ```
+
 
 ## 🏗️ Design Decisions
 
@@ -113,10 +107,6 @@ npm test -- --coverage
 1. The application is a single-vendor e-commerce platform
 2. No user authentication is required (for MVP)
 3. The cart is persisted in localStorage
-4. All prices are in USD
+4. All prices are in Rupees
 
-## 📝 License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🤝 Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
