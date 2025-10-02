@@ -1,8 +1,8 @@
-# 🛍️ E-Commerce Store
+#  E-Commerce Store
 
 A modern, full-stack e-commerce application built with React and Node.js. This project provides a seamless shopping experience with product browsing, cart management, and checkout functionality.
 
-## 🚀 Features
+##  Features
 
 - **Product Catalog**
   - Browse products by categories and subcategories
@@ -82,7 +82,7 @@ npx jest --verbose
 ```
 
 
-## 🏗️ Design Decisions
+##  Design Decisions
 
 ### Architecture
 - **Frontend**: Component-based architecture with React
