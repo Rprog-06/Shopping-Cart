@@ -1,466 +1,616 @@
-import React, { useEffect, useState } from "react";
-import axios from "axios";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { ShoppingCart, Search, X } from "lucide-react";
+import { FiFilter } from "react-icons/fi";
+import ProductCard from "./components/ProductCard";
+import CartDrawer from "./components/CartDrawer";
+import ProductDetailsModal from "./components/ProductDetailsModal";
+import Toast from "./components/Toast";
 
-// API base (change via env var if needed)
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:5000";
-
-const currency = (value) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value);
-
-export default function App() {
+const productsUrl = "http://localhost:5000/api/products";
+const categoriesUrl = "http://localhost:5000/api/categories";
+const App = () => {
   const [products, setProducts] = useState([]);
-  const [categories, setCategories] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [cart, setCart] = useState([]);
-  const [showCart, setShowCart] = useState(false);
-  const [toast, setToast] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+  // Initialize cart from localStorage
+  const [cart, setCart] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const savedCart = localStorage.getItem('shoppingCart');
+      return savedCart ? JSON.parse(savedCart) : [];
+    }
+    return [];
+  });
+  const [isCartOpen, setIsCartOpen] = useState(false); // Set cart to be open by default
   const [searchTerm, setSearchTerm] = useState("");
+  const [categories, setCategories] = useState([]);
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [selectedSubcategory, setSelectedSubcategory] = useState("all");
+  const [isCategoryOpen, setIsCategoryOpen] = useState(true);
   const [showProductModal, setShowProductModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
-
-  // load cart from localStorage
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem("cart");
-      if (saved) setCart(JSON.parse(saved));
-    } catch (e) {
-      console.error("Failed to read cart from localStorage", e);
-    }
-  }, []);
-
-  // persist cart
-  useEffect(() => {
-    try {
-      localStorage.setItem("cart", JSON.stringify(cart));
-    } catch (e) {
-      console.error("Failed to save cart to localStorage", e);
-    }
-  }, [cart]);
-
-  // fetch products and categories
-  useEffect(() => {
-    let mounted = true;
-
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        // Fetch both products and categories in parallel
-        const [productsRes, categoriesRes] = await Promise.all([
-          axios.get(`${API_BASE}/api/products`),
-          axios.get(`${API_BASE}/api/categories`)
-        ]);
-
-        if (mounted) {
-          setProducts(productsRes.data || []);
-          setCategories(categoriesRes.data || []);
-          console.log("Categories loaded:", categoriesRes.data);
-          console.log("Products loaded:", productsRes.data?.map(p => `${p.name}: ${p.category} -> ${p.subcategory}`));
-        }
-      } catch (err) {
-        console.error(err);
-        showToast("Failed to load data");
-      } finally {
-        if (mounted) setLoading(false);
+  const [toast, setToast] = useState({ show: false, message: "", type: "success" });
+  
+  // State for price range filter
+  const [priceRange, setPriceRange] = useState("");
+  const [sortBy, setSortBy] = useState("featured");
+  
+  // Get subcategories for the selected category
+  const currentSubcategories = useMemo(() => {
+    if (selectedCategory === "all") return [];
+    
+    // Find the category by name (case insensitive)
+    const category = Array.isArray(categories) 
+      ? categories.find(cat => 
+          cat.name && cat.name.toLowerCase() === selectedCategory.toLowerCase()
+        ) 
+      : null;
+      
+    // If no category found, try to find in the products
+    if (!category) {
+      const productWithCategory = products.find(p => 
+        p.category && p.category.toLowerCase() === selectedCategory.toLowerCase()
+      );
+      if (productWithCategory) {
+        // If we found a product with this category, return its subcategories if any
+        return productWithCategory.subcategory 
+          ? [{ id: productWithCategory.subcategory, name: productWithCategory.subcategory }] 
+          : [];
       }
-    };
+      return [];
+    }
+    
+    return category.subcategories || [];
+  }, [categories, selectedCategory]);
 
-    fetchData();
-    return () => (mounted = false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const showToast = (msg) => {
-    setToast(msg);
-    window.setTimeout(() => setToast(null), 2400);
-  };
-
-  const addToCart = (product) => {
-    setCart((prev) => {
-      const found = prev.find((p) => p.id === product.id);
-      if (found) return prev.map((p) => (p.id === product.id ? { ...p, quantity: p.quantity + 1 } : p));
-      return [...prev, { ...product, quantity: 1 }];
-    });
-    showToast(`${product.name} added to cart`);
-  };
-
-  const updateQuantity = (id, qty) => {
-    setCart((prev) => {
-      if (qty < 1) return prev.filter((p) => p.id !== id);
-      return prev.map((p) => (p.id === id ? { ...p, quantity: qty } : p));
-    });
-  };
-
-  const removeFromCart = (id) => {
-    setCart((prev) => prev.filter((p) => p.id !== id));
-    showToast("Item removed from cart");
-  };
-
-  const itemsCount = cart.reduce((s, i) => s + (i.quantity || 0), 0);
-  const total = cart.reduce((s, i) => s + (i.quantity || 0) * (i.price || 0), 0);
-
-  // Filter products based on search term, category, and subcategory
-  const filteredProducts = products.filter(product => {
-    const matchesSearch = product.name.toLowerCase().includes(searchTerm.toLowerCase());
-
-    // Handle category and subcategory filtering
-    let matchesFilter = true;
-    if (selectedCategory !== "all" || selectedSubcategory !== "all") {
+  // Sort products based on selected sort option
+  const sortedAndFilteredProducts = useMemo(() => {
+    // First filter the products
+    let result = [...products].filter(product => {
+      // Debug logs - can be removed after fixing
+      console.log('Product:', product.name, 'Category:', product.category, 'Subcategory:', product.subcategory);
+      console.log('Selected Category:', selectedCategory, 'Selected Subcategory:', selectedSubcategory);
+      
+      // Search term filter - only match exact product names
+      const searchLower = searchTerm.toLowerCase().trim();
+      const matchesSearch = searchTerm === "" || 
+        product.name.toLowerCase() === searchLower ||
+        // Only include partial matches if the search term is longer than 3 characters
+        (searchLower.length >= 3 && 
+         product.name.toLowerCase().includes(searchLower));
+      
+      // Category filter - check if product's category matches selected category
+      const matchesCategory = selectedCategory === "all" || 
+        (product.category && product.category.toLowerCase() === selectedCategory.toLowerCase());
+      
+      // Subcategory filter - only apply if a subcategory is selected
+      let matchesSubcategory = true;
       if (selectedSubcategory !== "all") {
-        // If a subcategory is selected, filter by subcategory
-        matchesFilter = product.subcategory === selectedSubcategory;
-        console.log(`Filtering by subcategory ${selectedSubcategory}, product ${product.name} has subcategory ${product.subcategory}, match: ${matchesFilter}`);
-      } else if (selectedCategory !== "all") {
-        // If only a category is selected, filter by category
-        matchesFilter = product.category === selectedCategory;
-        console.log(`Filtering by category ${selectedCategory}, product ${product.name} has category ${product.category}, match: ${matchesFilter}`);
+        matchesSubcategory = product.subcategory && 
+          product.subcategory.toLowerCase() === selectedSubcategory.toLowerCase();
       }
-    }
+      
+      // Price range filter with better handling of ranges
+      let matchesPrice = true;
+      if (priceRange) {
+        try {
+          const [minStr, maxStr] = priceRange.split('-');
+          const min = minStr ? parseInt(minStr, 10) : null;
+          const max = maxStr ? parseInt(maxStr, 10) : null;
+          
+          if (min !== null && max !== null) {
+            // Range with both min and max (e.g., 5000-10000)
+            matchesPrice = product.price >= min && product.price <= max;
+          } else if (min !== null) {
+            // Only min specified (e.g., 10000-)
+            matchesPrice = product.price >= min;
+          } else if (max !== null) {
+            // Only max specified (e.g., -5000)
+            matchesPrice = product.price <= max;
+          }
+          
+          console.log(`Price check - Product: ${product.name}, Price: ${product.price}, Range: ${priceRange}, Matches: ${matchesPrice}`);
+        } catch (error) {
+          console.error('Error processing price range:', error);
+        }
+      }
+      
+      // Debug log the matching results
+      console.log(`Product: ${product.name} - Matches:`, {
+        search: matchesSearch,
+        category: matchesCategory,
+        subcategory: matchesSubcategory,
+        price: matchesPrice
+      });
+      
+      return matchesSearch && matchesCategory && matchesSubcategory && matchesPrice;
+    });
 
-    const result = matchesSearch && matchesFilter;
-    if (!result && (searchTerm || selectedCategory !== "all" || selectedSubcategory !== "all")) {
-      console.log(`Filtered out: ${product.name} - search: ${matchesSearch}, filter: ${matchesFilter}`);
+    // Then sort the filtered products
+    switch(sortBy) {
+      case 'price-asc':
+        return [...result].sort((a, b) => a.price - b.price);
+      case 'price-desc':
+        return [...result].sort((a, b) => b.price - a.price);
+      case 'name-asc':
+        return [...result].sort((a, b) => a.name.localeCompare(b.name));
+      case 'name-desc':
+        return [...result].sort((a, b) => b.name.localeCompare(a.name));
+      case 'featured':
+      default:
+        return result;
     }
-    return result;
-  });
-
+  }, [products, searchTerm, selectedCategory, selectedSubcategory, priceRange, sortBy]);
+  
+  // View product details
   const viewProduct = (product) => {
     setSelectedProduct(product);
     setShowProductModal(true);
   };
 
+  // Close product modal
   const closeProductModal = () => {
     setShowProductModal(false);
-    setSelectedProduct(null);
+    // Small delay to allow the modal to close before clearing the product
+    // This prevents any flicker in the UI
+    setTimeout(() => setSelectedProduct(null), 300);
   };
 
-  const checkout = async () => {
-    if (cart.length === 0) {
-      showToast("Cart is empty");
-      return;
-    }
+  const fetchProducts = useCallback(async () => {
     try {
-      const res = await axios.post(`${API_BASE}/api/checkout`, { cart });
-      showToast(res.data?.message || "Order placed");
-      setCart([]);
-      setShowCart(false);
+      setIsLoading(true);
+      setError(null);
+      const [productsRes, categoriesRes] = await Promise.all([
+        fetch(productsUrl),
+        fetch(categoriesUrl)
+      ]);
+
+      if (!productsRes.ok) throw new Error('Failed to fetch products');
+      if (!categoriesRes.ok) throw new Error('Failed to fetch categories');
+
+      const [productsData, categoriesData] = await Promise.all([
+        productsRes.json(),
+        categoriesRes.json()
+      ]);
+
+      setProducts(productsData);
+      setCategories(categoriesData);
     } catch (err) {
-      console.error(err);
-      showToast("Checkout failed");
+      console.error("Error fetching data:", err);
+      setError(err.message || 'An error occurred while fetching data');
+      setToast({
+        show: true,
+        message: 'Failed to load products. Please try again later.',
+        type: 'error'
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchProducts();
+  }, []);
+
+  const clearFilters = useCallback(() => {
+    setSearchTerm("");
+    setSelectedCategory("all");
+    setSelectedSubcategory("all");
+  }, []);
+
+  const hasActiveFilters = searchTerm || selectedCategory !== "all" || selectedSubcategory !== "all";
+
+  // Save cart to localStorage whenever it changes
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('shoppingCart', JSON.stringify(cart));
+    }
+  }, [cart]);
+
+  //  Add to Cart Function
+  const addToCart = (product) => {
+    setCart((prevCart) => {
+      const itemExists = prevCart.find((item) => item.id === product.id);
+      if (itemExists) {
+        return prevCart.map((item) =>
+          item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
+        );
+      }
+      return [...prevCart, { ...product, quantity: 1 }];
+    });
+
+    setToast({
+      show: true,
+      message: `${product.name} added to cart!`,
+      type: "success"
+    });
+    setTimeout(() => setToast({ show: false, message: "", type: "success" }), 2000);
+  };
+
+  //  Remove from Cart Function
+  const removeFromCart = (id) => {
+    setCart((prevCart) => prevCart.filter((item) => item.id !== id));
+  };
+
+  //  Update Quantity
+  const updateQuantity = (id, quantity) => {
+    if (quantity < 1) {
+      // Remove the item if quantity reaches zero
+      removeFromCart(id);
+    } else {
+      setCart((prevCart) =>
+        prevCart.map((item) =>
+          item.id === id ? { ...item, quantity } : item
+        )
+      );
     }
   };
+
+  // Handle order placement
+  const placeOrder = () => {
+    // In a real app, you would send the order to your backend here
+    console.log('Placing order:', cart);
+    
+    // Show success message
+    setToast({
+      show: true,
+      message: 'Order placed successfully!',
+      type: 'success'
+    });
+    
+    // Clear the cart
+    setCart([]);
+    
+    // Close the cart drawer
+    setIsCartOpen(false);
+  };
+
+  // Group products by category for the sidebar
+  const categoriesWithCount = products.reduce((acc, product) => {
+    acc[product.category] = (acc[product.category] || 0) + 1;
+    return acc;
+  }, {});
+
+  const uniqueCategories = Object.keys(categoriesWithCount);
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <header className="bg-white shadow">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-indigo-700 text-white rounded-lg flex items-center justify-center font-semibold">E</div>
-            <h1 className="text-xl font-semibold">Mini Shop</h1>
-            <div className="hidden md:block ml-6">
-              <input
-                type="search"
-                placeholder="Search products..."
-                className="border rounded-md px-3 py-1 w-64 focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center space-x-3">
-            {/* Categories Dropdown */}
-            <div className="hidden md:block relative">
-              <select
-                value={selectedSubcategory !== "all" ? selectedSubcategory : selectedCategory}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  if (value === "all") {
-                    setSelectedCategory("all");
-                    setSelectedSubcategory("all");
-                  } else {
-                    // Check if it's a subcategory (by looking for it in any category's subcategories)
-                    let foundSubcategory = null;
-                    for (const category of categories) {
-                      if (category.subcategories?.find(s => s.id === value)) {
-                        foundSubcategory = category.subcategories.find(s => s.id === value);
-                        break;
-                      }
-                    }
-
-                    console.log("Selected value:", value, "Found subcategory:", foundSubcategory);
-
-                    if (foundSubcategory) {
-                      // It's a subcategory
-                      setSelectedSubcategory(value);
-                      setSelectedCategory(foundSubcategory.parent || "all");
-                      console.log("Set subcategory:", value, "parent:", foundSubcategory.parent);
-                    } else {
-                      // It's a main category
-                      setSelectedCategory(value);
-                      setSelectedSubcategory("all");
-                      console.log("Set category:", value);
-                    }
-                  }
-                }}
-                className="appearance-none bg-white border border-gray-300 rounded-md px-4 py-2 pr-8 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent"
-              >
-                <option value="all">All Categories ({products.length})</option>
-                {categories.map((category) => (
-                  <optgroup key={category.id} label={`${category.name} (${category.productCount})`}>
-                    <option value={category.id}>
-                      {category.name} ({category.productCount})
-                      {!category.available && " - Not Available"}
-                    </option>
-                    {category.subcategories?.map((subcategory) => (
-                      <option key={subcategory.id} value={subcategory.id}>
-                        &nbsp;&nbsp;{subcategory.name} ({subcategory.productCount})
-                        {!subcategory.available && " - Not Available"}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-              <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
-                <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </div>
-            </div>
-            <button
-              onClick={() => setShowCart(true)}
-              aria-label="Open cart"
-              className="relative inline-flex items-center px-3 py-2 bg-indigo-600 text-white rounded-md"
-            >
-              Cart
-              <span className="ml-2 inline-block bg-white text-indigo-600 rounded-full text-xs w-6 h-6 flex items-center justify-center font-medium">{itemsCount}</span>
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <main className="container mx-auto px-4 py-8">
-        {/* Filter Status */}
-        {!loading && (searchTerm || selectedCategory !== "all") && (
-          <div className="mb-6">
+      
+      {/* Header */}
+      <header className="bg-white shadow-sm sticky top-0 z-20">
+        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div className="flex items-center justify-between">
-              <div className="text-sm text-gray-600">
-                {searchTerm && selectedCategory !== "all" && selectedSubcategory !== "all" ? (
-                  <>Showing {filteredProducts.length} products for "<span className="font-medium">{searchTerm}</span>" in <span className="font-medium">{categories.find(c => c.id === selectedCategory)?.name}</span> → <span className="font-medium">{categories.find(c => c.subcategories?.find(s => s.id === selectedSubcategory))?.subcategories?.find(s => s.id === selectedSubcategory)?.name}</span></>
-                ) : searchTerm && selectedCategory !== "all" ? (
-                  <>Showing {filteredProducts.length} products for "<span className="font-medium">{searchTerm}</span>" in <span className="font-medium">{categories.find(c => c.id === selectedCategory)?.name}</span></>
-                ) : searchTerm && selectedSubcategory !== "all" ? (
-                  <>Showing {filteredProducts.length} products for "<span className="font-medium">{searchTerm}</span>" in <span className="font-medium">{categories.find(c => c.subcategories?.find(s => s.id === selectedSubcategory))?.subcategories?.find(s => s.id === selectedSubcategory)?.name}</span></>
-                ) : searchTerm ? (
-                  <>Showing {filteredProducts.length} products for "<span className="font-medium">{searchTerm}</span>"</>
-                ) : selectedCategory !== "all" && selectedSubcategory !== "all" ? (
-                  <>Showing {filteredProducts.length} products in <span className="font-medium">{categories.find(c => c.id === selectedCategory)?.name}</span> → <span className="font-medium">{categories.find(c => c.subcategories?.find(s => s.id === selectedSubcategory))?.subcategories?.find(s => s.id === selectedSubcategory)?.name}</span></>
-                ) : selectedCategory !== "all" ? (
-                  <>Showing {filteredProducts.length} products in <span className="font-medium">{categories.find(c => c.id === selectedCategory)?.name}</span></>
-                ) : selectedSubcategory !== "all" ? (
-                  <>Showing {filteredProducts.length} products in <span className="font-medium">{categories.find(c => c.subcategories?.find(s => s.id === selectedSubcategory))?.subcategories?.find(s => s.id === selectedSubcategory)?.name}</span></>
-                ) : (
-                  <>Showing all {filteredProducts.length} products</>
-                )}
-              </div>
+              <h1 className="text-2xl font-bold text-indigo-600">ShopEase</h1>
               <button
-                onClick={() => {
-                  setSearchTerm("");
-                  setSelectedCategory("all");
-                  setSelectedSubcategory("all");
-                }}
-                className="text-sm text-indigo-600 hover:text-indigo-800"
+                onClick={() => setIsCartOpen(true)}
+                className="md:hidden relative p-2 text-gray-600 hover:text-gray-900"
               >
-                Clear filters
+                <ShoppingCart className="h-6 w-6" />
+                {cart.length > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-indigo-600 text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center">
+                    {cart.reduce((total, item) => total + item.quantity, 0)}
+                  </span>
+                )}
               </button>
             </div>
-          </div>
-        )}
-
-        <section>
-          {loading ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-              {Array.from({ length: 8 }).map((_, i) => (
-                <div key={i} className="border rounded-lg p-4 bg-white animate-pulse h-64"></div>
-              ))}
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-              {filteredProducts.length > 0 ? (
-                filteredProducts.map((p) => (
-                  <div key={p.id} className="bg-white border rounded-lg overflow-hidden shadow-sm hover:shadow-md transition transform hover:-translate-y-1">
-                    <img src={p.imageUrl} alt={p.name} className="w-full h-40 object-cover" />
-                    <div className="p-4">
-                      <h3 className="font-medium text-sm">{p.name}</h3>
-                      <p className="mt-2 font-semibold">{currency(p.price)}</p>
-                      <div className="mt-3 flex items-center justify-between">
-                        <button className="px-3 py-1 bg-indigo-600 text-white rounded-md text-sm" onClick={() => addToCart(p)}>
-                          Add to cart
-                        </button>
-                        <button className="text-sm text-gray-500 hover:text-indigo-600" onClick={() => viewProduct(p)}>
-                          View Details
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))
+            
+            <div className="relative flex-1 max-w-2xl">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <Search className="h-5 w-5 text-gray-400" />
+              </div>
+              <input
+                type="text"
+                placeholder="Search products..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="block w-full pl-10 pr-10 py-2.5 border border-gray-300 rounded-lg leading-5 bg-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm transition-shadow"
+              />
+              {searchTerm ? (
+                <button
+                  onClick={() => setSearchTerm("")}
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  <X className="h-5 w-5" />
+                </button>
               ) : (
-                <div className="col-span-full text-center py-12">
-                  <div className="text-gray-400 mb-2">
-                    <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 009.586 13H7" />
-                    </svg>
-                  </div>
-                  <h3 className="text-lg font-medium text-gray-900 mb-1">
-                    {searchTerm || selectedCategory !== "all" || selectedSubcategory !== "all" ? "No products match your filters" : "No products found"}
-                  </h3>
-                  <p className="text-gray-500">
-                    {searchTerm || selectedCategory !== "all" || selectedSubcategory !== "all"
-                      ? "Try adjusting your search or category filters"
-                      : "Check back later for new products"}
-                  </p>
+                <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+                  <kbd className="inline-flex items-center px-2 py-1 border border-gray-200 rounded text-xs font-sans font-medium text-gray-400">
+                    ⌘K
+                  </kbd>
                 </div>
               )}
             </div>
-          )}
-        </section>
-      </main>
-
-      {/* Cart Drawer */}
-      <div
-        className={`fixed inset-y-0 right-0 w-full md:w-96 bg-white shadow-lg transform transition-transform ${
-          showCart ? "translate-x-0" : "translate-x-full"
-        } z-50`}
-      >
-        <div className="p-4 border-b flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Your Cart ({itemsCount})</h2>
-          <button onClick={() => setShowCart(false)} aria-label="Close cart" className="text-gray-500 px-2 py-1 rounded hover:bg-gray-100">
-            Close
-          </button>
-        </div>
-        <div className="p-4 h-[70vh] overflow-auto">
-          {cart.length === 0 ? (
-            <div className="text-center text-gray-500 mt-20">
-              <p className="mb-2">Your cart is empty</p>
-              <p className="text-sm">Add products to see them here.</p>
-            </div>
-          ) : (
-            <ul className="space-y-4">
-              {cart.map((item) => (
-                <li key={item.id} className="flex items-center space-x-3">
-                  <img src={item.imageUrl} alt={item.name} className="w-16 h-16 object-cover rounded" />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <h4 className="font-medium">{item.name}</h4>
-                      <button onClick={() => removeFromCart(item.id)} className="text-sm text-red-500">
-                        Remove
-                      </button>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between">
-                      <div className="flex items-center border rounded">
-                        <button className="px-2" onClick={() => updateQuantity(item.id, item.quantity - 1)} aria-label="Decrease">-</button>
-                        <div className="px-3">{item.quantity}</div>
-                        <button className="px-2" onClick={() => updateQuantity(item.id, item.quantity + 1)} aria-label="Increase">+</button>
-                      </div>
-                      <div className="font-semibold">{currency(item.price * item.quantity)}</div>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <div className="p-4 border-t">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-sm text-gray-600">Subtotal</div>
-            <div className="font-semibold">{currency(total)}</div>
-          </div>
-          <div className="flex space-x-2">
+            
             <button
-              onClick={() => {
-                setCart([]);
-                showToast("Cart cleared");
-              }}
-              className="flex-1 border rounded-md px-3 py-2"
+              onClick={() => setIsCartOpen(true)}
+              className="hidden md:flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
             >
-              Clear
-            </button>
-            <button onClick={checkout} className="flex-1 bg-indigo-600 text-white rounded-md px-3 py-2">
-              Checkout
+              <ShoppingCart className="h-5 w-5" />
+              <span>Cart</span>
+              {cart.length > 0 && (
+                <span className="bg-white text-indigo-600 text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center">
+                  {cart.reduce((total, item) => total + item.quantity, 0)}
+                </span>
+              )}
             </button>
           </div>
+          
+          {searchTerm && (
+            <div className="mt-3 text-sm text-gray-500">
+              <span>Search results for: </span>
+              <span className="font-medium">"{searchTerm}"</span>
+              <button 
+                onClick={() => setSearchTerm("")}
+                className="ml-2 text-indigo-600 hover:text-indigo-800"
+              >
+                Clear search
+              </button>
+            </div>
+          )}
         </div>
-      </div>
-
-      {/* Product Details Modal */}
-      {showProductModal && selectedProduct && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-            <div className="p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-2xl font-bold text-gray-900">{selectedProduct.name}</h2>
+      </header>
+      
+      {/* Subcategories Bar */}
+      {selectedCategory !== "all" && currentSubcategories.length > 0 && (
+        <div className="bg-white border-b border-gray-200">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex overflow-x-auto py-2 space-x-2">
+              <button
+                onClick={() => setSelectedSubcategory("all")}
+                className={`whitespace-nowrap px-4 py-2 rounded-full text-sm font-medium ${
+                  selectedSubcategory === "all"
+                    ? 'bg-indigo-100 text-indigo-800'
+                    : 'text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                All
+              </button>
+              {currentSubcategories.map((subcategory) => (
                 <button
-                  onClick={closeProductModal}
-                  className="text-gray-400 hover:text-gray-600"
+                  key={subcategory.id}
+                  onClick={() => setSelectedSubcategory(subcategory.id)}
+                  className={`whitespace-nowrap px-4 py-2 rounded-full text-sm font-medium ${
+                    selectedSubcategory === subcategory.id
+                      ? 'bg-indigo-100 text-indigo-800'
+                      : 'text-gray-600 hover:bg-gray-100'
+                  }`}
                 >
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  {subcategory.name}
+                  <span className="ml-1.5 text-xs font-normal bg-gray-100 text-gray-500 rounded-full px-2 py-0.5">
+                    {subcategory.productCount || 0}
+                  </span>
                 </button>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <img
-                    src={selectedProduct.imageUrl}
-                    alt={selectedProduct.name}
-                    className="w-full h-64 object-cover rounded-lg"
-                  />
-                </div>
-
-                <div>
-                  <div className="mb-4">
-                    <span className="inline-block bg-indigo-100 text-indigo-800 text-sm font-medium px-3 py-1 rounded-full mb-2">
-                      {selectedProduct.category} → {selectedProduct.subcategory}
-                    </span>
-                    <p className="text-3xl font-bold text-gray-900">{currency(selectedProduct.price)}</p>
-                  </div>
-
-                  <div className="mb-6">
-                    <h3 className="text-lg font-semibold text-gray-900 mb-2">Description</h3>
-                    <p className="text-gray-600 leading-relaxed">{selectedProduct.description}</p>
-                  </div>
-
-                  <div className="space-y-3">
-                    <button
-                      className="w-full bg-indigo-600 text-white py-3 px-6 rounded-md font-medium hover:bg-indigo-700 transition"
-                      onClick={() => {
-                        addToCart(selectedProduct);
-                        closeProductModal();
-                      }}
-                    >
-                      Add to Cart - {currency(selectedProduct.price)}
-                    </button>
-                    <button
-                      className="w-full border border-gray-300 text-gray-700 py-3 px-6 rounded-md font-medium hover:bg-gray-50 transition"
-                      onClick={closeProductModal}
-                    >
-                      Close
-                    </button>
-                  </div>
-                </div>
-              </div>
+              ))}
             </div>
           </div>
         </div>
       )}
+      
+      <main className="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+        <div className="flex flex-col lg:flex-row gap-6">
+          {/* Categories Sidebar - Hidden on mobile when subcategories are shown */}
+          <div className={`${selectedCategory !== "all" && currentSubcategories.length > 0 ? 'hidden lg:block' : ''} w-full lg:w-64 flex-shrink-0`}>
+            <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100 sticky top-24">
+              <div className="flex items-center justify-between mb-5">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                  <FiFilter className="mr-2 h-5 w-5 text-indigo-500" />
+                  Categories
+                </h2>
+                {(selectedCategory !== "all" || selectedSubcategory !== "all") && (
+                  <button
+                    onClick={clearFilters}
+                    className="text-sm text-indigo-600 hover:text-indigo-800 hover:underline"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+              
+              <div className="space-y-1">
+                <div 
+                  className={`flex items-center px-3 py-2.5 rounded-lg cursor-pointer ${
+                    selectedCategory === "all" ? 'bg-indigo-50 text-indigo-700' : 'hover:bg-gray-50'
+                  }`}
+                  onClick={() => {
+                    setSelectedCategory("all");
+                    setSelectedSubcategory("all");
+                  }}
+                >
+                  <span className="text-sm font-medium">All Categories</span>
+                  <span className="ml-auto text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+                    {products.length}
+                  </span>
+                </div>
+                
+                {uniqueCategories.map((category) => (
+                  <div key={category} className="pl-3">
+                    <div 
+                      className={`flex items-center px-3 py-2 -ml-3 rounded-lg cursor-pointer ${
+                        selectedCategory === category ? 'bg-indigo-50 text-indigo-700' : 'hover:bg-gray-50'
+                      }`}
+                      onClick={() => {
+                        setSelectedCategory(category);
+                        setSelectedSubcategory("all");
+                      }}
+                    >
+                      <span className="text-sm">{category}</span>
+                      <span className="ml-auto text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+                        {categoriesWithCount[category]}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              
+              {/* Price Filter */}
+              <div className="mt-6 pt-5 border-t border-gray-100">
+                <h3 className="text-sm font-medium text-gray-900 mb-3">Price Range</h3>
+                <div className="space-y-2">
+                  {[
+                    { label: 'All Prices', value: '' },
+                    { label: 'Under ₹1,000', value: '0-1000' },
+                    { label: '₹1,000 - ₹5,000', value: '1000-5000' },
+                    { label: '₹5,000 - ₹10,000', value: '5000-10000' },
+                    { label: 'Over ₹10,000', value: '10000-' },
+                  ].map((range) => (
+                    <div key={range.value} className="flex items-center">
+                      <input
+                        id={`price-${range.value}`}
+                        name="price-range"
+                        type="radio"
+                        checked={priceRange === range.value}
+                        onChange={() => setPriceRange(range.value)}
+                        className="h-4 w-4 border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <label htmlFor={`price-${range.value}`} className="ml-3 text-sm text-gray-600 cursor-pointer">
+                        {range.label}
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              
+              {/* Subcategories */}
+              {currentSubcategories.length > 0 && (
+                <div className="mt-6 pt-5 border-t border-gray-100">
+                  <h3 className="text-sm font-medium text-gray-900 mb-3">Subcategories</h3>
+                  <div className="space-y-2 pl-2">
+                    <div 
+                      className={`flex items-center px-3 py-2 -ml-3 rounded-lg cursor-pointer ${
+                        selectedSubcategory === "all" ? 'bg-indigo-50 text-indigo-700' : 'hover:bg-gray-50'
+                      }`}
+                      onClick={() => setSelectedSubcategory("all")}
+                    >
+                      <span className="text-sm">All Subcategories</span>
+                    </div>
+                    {currentSubcategories.map((subcategory) => (
+                      <div 
+                        key={subcategory.id} 
+                        className={`flex items-center px-3 py-2 rounded-lg cursor-pointer ${
+                          selectedSubcategory === subcategory.id ? 'bg-indigo-50 text-indigo-700' : 'hover:bg-gray-50'
+                        }`}
+                        onClick={() => setSelectedSubcategory(subcategory.id)}
+                      >
+                        <span className="text-sm">{subcategory.name}</span>
+                        <span className="ml-auto text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+                          {subcategory.productCount || 0}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+          
+          {/* Products Grid */}
+          <div className="flex-1">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-3">
+              <h2 className="text-xl font-bold text-gray-900">
+                {selectedCategory === "all" ? "All Products" : selectedCategory}
+                <span className="text-gray-500 font-normal ml-2">
+                  ({sortedAndFilteredProducts.length} {sortedAndFilteredProducts.length === 1 ? 'item' : 'items'})
+                </span>
+              </h2>
+              
+              <div className="flex items-center gap-3 text-sm text-gray-500">
+                <span>Sort by:</span>
+                <select 
+                  className="bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300"
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value)}
+                >
+                  <option value="featured">Featured</option>
+                  <option value="price-asc">Price: Low to High</option>
+                  <option value="price-desc">Price: High to Low</option>
+                  <option value="name-asc">Name: A to Z</option>
+                  <option value="name-desc">Name: Z to A</option>
+                  <option value="name-asc">Name: A to Z</option>
+                  <option value="name-desc">Name: Z to A</option>
+                </select>
+              </div>
+            </div>
+
+            {isLoading ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                {[...Array(8)].map((_, i) => (
+                  <div key={i} className="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-100 animate-pulse">
+                    <div className="bg-gray-200 h-48 w-full"></div>
+                    <div className="p-4">
+                      <div className="h-4 bg-gray-200 rounded w-3/4 mb-2"></div>
+                      <div className="h-4 bg-gray-200 rounded w-1/2 mb-4"></div>
+                      <div className="h-10 bg-gray-200 rounded-lg"></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : sortedAndFilteredProducts.length === 0 ? (
+              <div className="bg-white rounded-xl shadow-sm p-12 text-center border border-gray-100">
+                <div className="mx-auto h-24 w-24 text-gray-300 mb-4">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-medium text-gray-900 mb-1">No products found</h3>
+                <p className="text-gray-500 mb-6">
+                  {searchTerm 
+                    ? `No products match "${searchTerm}"`
+                    : 'Try adjusting your search or filter to find what you\'re looking for.'}
+                </p>
+                <button
+                  onClick={clearFilters}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                >
+                  Clear all filters
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                {sortedAndFilteredProducts.map((product) => (
+                  <ProductCard
+                    key={product.id}
+                    product={product}
+                    addToCart={addToCart}
+                    openModal={() => viewProduct(product)}
+                  />
+                ))}
+              </div>
+            )}
+            
+            {/* Removed Load more button */}
+          </div>
+        </div>
+      </main>
+
+      {/* Product Details Modal */}
+      {selectedProduct && (
+        <ProductDetailsModal
+          product={selectedProduct}
+          onClose={() => setSelectedProduct(null)}
+          addToCart={addToCart} // passed here too
+        />
+      )}
+
+      {/* Cart Drawer */}
+      <CartDrawer
+        isOpen={isCartOpen}
+        onClose={() => setIsCartOpen(false)} 
+        cart={cart}
+        removeFromCart={removeFromCart}
+        updateQuantity={updateQuantity}
+        onPlaceOrder={placeOrder}
+      />
 
       {/* Toast */}
-      {toast && (
-        <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white px-4 py-2 rounded shadow">
-          {toast}
-        </div>
+      {toast.show && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast(prev => ({ ...prev, show: false }))}
+        />
       )}
     </div>
   );
 }
+
+export default App;
